@@ -1,0 +1,1300 @@
+---
+title: "Analiza nagrań obecności ptaków na terenie Francji"
+format: 
+  pdf:
+    engine: xelatex
+editor: visual
+---
+
+# Wstęp
+
+### Cel analizy
+
+Nasza analiza dotyczy zarejestrowanych przypadków obecności ptaków na terenie Francji, na podstawie danych dotyczących wykrycia akustycznego oraz obserwacji wizualnych.
+
+Celem analizy jest zidentyfikowanie warunków sprzyjających obserwacji ptaków, zarówno poprzez nagrania dźwiękowe, jak i bezpośrednią obserwację.
+
+W ramach analizy wskażemy rejony, miesiące oraz przedziały godzinowe, które charakteryzują się największą ptasią aktywnością. Ponadto przeanalizujemy występowanie najczęstszych gatunków oraz porównamy warunki sprzyjające wykryciu akustycznemu z warunkami sprzyjającymi obserwacji wizualnej.
+
+### Wybrane dane
+
+Pierwotnym źródłem danych wykorzystanychy w naszym opracowaniu jest serwis xeno-canto.org. Xeno-canto to internetowa baza danych, której celem jest gromadzenie oraz udostępnianie nagrań dzwięków dzikiej przyrody pochodzących z różnych zakątków świata. Serwis opiera się na wkładzie użytkowników, którzy przesyłają własne nagrania, a następnie są one udostępniane szerokiemu gronu odbiorców - zarówno w celach naukowych, jak i edukacyjnych czy hobbistycznych.
+
+Platforma Xeno-canto obejmuje dane dotyczące wielu gatunków zwierząt, jednak w tamach nieniejszej analizy skupimy się wyłącznie na awifaunie występującej na terenie Francji. Wykorzystany zbiór dancyh zpstał bobrany z platformy Kaggle, gdzie udostępniono go w formie przystosowanej do analizy.
+
+(<https://www.kaggle.com/datasets/gpreda/xenocanto-birds-from-france>).
+
+Baza danych zawiera 26 kolumn, jednakże w naszej analizie nie wykorzystamy ich wszystkich. Kolumny, które będą ważne w naszej analizie to:
+
+-   sp - gatunek zarejestrowanego ptaka po łacinie
+
+-   gen - gatunek zarejestrowanego ptaka w języku angielskim
+
+-   loc - lokalizacja rejestracji ptaka (miasto, departament, region)
+
+-   lat - szerokość geograficzna rejestracji w stopniach
+
+-   lng - długość geograficzna rejestracji w stopniach
+
+-   alt - wysokośc nad poziomem morza rejestracji w metrach
+
+-   type - typ zarejestrowanego dźwięku. Skupimy się na dwóch typach: "song" - śpiew, oraz "call" - odgłos
+
+-   length - długość zarejestrowanego nagrania (minuty:sekundy)
+
+-   time - godzina rejestracji
+
+-   date - data rejestracji
+
+-   bird-seen - dodatkowa informacja, czy podczas identyfikacji dźwiękowej ptak był również widziany (tak/nie)
+
+# Analiza
+
+### Miejsce, czas oraz pora obserwacji
+
+```{r}
+#| message: false
+#| warning: false
+#| echo: false
+
+library(tidyverse)
+library(stringr)
+library(lubridate)
+library(maps)
+library(ggplot2)
+library(showtext)
+
+# Ustawienie katalogu roboczego
+#setwd("E:/uczelnia/semestr 5/pakiety/projekt")
+setwd("C:/Users/Stasiu/Desktop/Gabi/pakiety_stat/projekt")
+ptaki_raw <- read_csv("birds_france.csv")
+
+#Dodanie czcionki systemowej 
+font_add_google("Lato", "lato") # Pobranie czcionkę z Google Fonts
+showtext_auto() # automatyczne wsparcie dla wykresów
+
+# KROK 1: CZYSZCZENIE, TRANSFORMACJA I FILTROWANIE DANYCH 
+
+ptaki_final <- ptaki_raw |>
+  rename(
+    rodzaj = gen,
+    gatunek_naukowy = sp,
+    gatunek = en,
+    obserwator = rec,
+    kraj = cnt,
+    miasto = loc,
+    LAT = lat,
+    LNG = lng,
+    wysokosc_m = alt,
+    typ_glosu_raw = type,
+    dlugosc_s = length,
+    czas_n_raw = time,
+    data_n_raw = date,
+    ptak_widziany = `bird-seen`
+  ) |>
+  mutate(
+    # 1. Konwersje numeryczne
+    LAT = as.numeric(LAT),
+    LNG = as.numeric(LNG),
+    wysokosc_m = as.numeric(wysokosc_m),
+    dlugosc_s = as.numeric(dlugosc_s),
+    
+    # 2. Konwersje czasu i daty
+    data_n = as_date(data_n_raw),
+    miesiac = factor(month(data_n, label = TRUE, abbr = FALSE), ordered = TRUE),
+    
+    # Ręczna konwersja czasu 
+    czas_split = str_split(czas_n_raw, ":", simplify = TRUE),
+    godzina = as.numeric(czas_split[,1]),
+    minuta = as.numeric(czas_split[,2]),
+    godzina_dec = godzina + minuta / 60,
+    
+    # 3. Ujednolicenie Typu Głosu
+    typ_glosu_glowny = case_when(
+      str_detect(tolower(typ_glosu_raw), "song") ~ "song",
+      str_detect(tolower(typ_glosu_raw), "call") ~ "call",
+      TRUE ~ "other"
+    ),
+    typ_glosu_glowny = as.factor(typ_glosu_glowny),
+    
+    # 4. Normalizacja ptak_widziany
+    ptak_widziany = factor(tolower(ptak_widziany), levels = c("yes", "no"))
+  ) |>
+  # Filtracja do Francji Kontynentalnej
+  filter(
+    LAT > 41,
+    LAT < 52,
+    LNG > -5,
+    LNG < 10
+  ) |>
+  # Usunięcie braków danych dla kluczowych analiz
+  drop_na(godzina_dec, typ_glosu_glowny, dlugosc_s, wysokosc_m, miesiac, ptak_widziany, LAT, LNG)
+
+#cat("Liczba obserwacji po kompletnym czyszczeniu:", nrow(ptaki_final), "\n")
+
+# 1. Statystyki podsumowujące: liczba nagrań na miesiąc
+nagrania_miesieczne <- ptaki_final |>
+  group_by(miesiac) |>
+  summarise(
+    liczba_nagran = n()
+  ) |>
+  # Sortowanie od największej liczby nagrań
+  arrange(desc(liczba_nagran))
+
+#print("--- Ranking Miesięcy wg. Liczby Nagrań ---")
+#print(nagrania_miesieczne)
+
+# 2. Wizualizacja: Wykres słupkowy
+wykres_nagrania_miesieczne <- nagrania_miesieczne |>
+  ggplot(aes(x = miesiac, y = liczba_nagran, fill = miesiac)) +
+  geom_col(show.legend = FALSE, fill = "#17a2b8", color = "black") + # Niebieski kolor
+  labs(
+    title = "Liczba Nagrań Ptaków w Podziale na Miesiące",
+    x = "Miesiąc Nagrania",
+    y = "Liczba Nagrań"
+  ) +
+  theme_minimal() +
+  # Obrót etykiet dla lepszej czytelności
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+wykres_nagrania_miesieczne <- wykres_nagrania_miesieczne +
+  theme(text = element_text(family = "lato"))
+
+print(wykres_nagrania_miesieczne)
+```
+
+Wnioski: Szczyt sezonu lęgowego ptaków przypada na okres od kwietnia do czerwca, co jest zgodne z danymi z obserwacji terenowych i biologicznymi zwyczajami ptaków. W kwietniu obserwujemy się wzrost aktywności związany z powrotem migrantów. Natomiast po czerwcu, kiedy ptaki kończą lęgi, aktywność nagrywania spada. Niższe wyniki nagrań w pozostałych miesiącach, zwłaszcza w okresie zimowym, mogą wynikać z imigracji ptaków.
+
+```{r}
+#| message: false
+#| warning: false
+#| echo: false
+
+library(tidyverse)
+library(stringr)
+library(lubridate) # Wymagany do pracy z czasem (hms, hour, minute)
+library(maps)
+library(ggplot2)
+
+
+#setwd("E:/uczelnia/semestr 5/pakiety/projekt")
+setwd("C:/Users/Stasiu/Desktop/Gabi/pakiety_stat/projekt")
+ptaki_raw <- read_csv("birds_france.csv")
+
+# CZYSZCZENIE, TRANSFORMACJA I FILTROWANIE DANYCH 
+ptaki_final <- ptaki_raw |>
+  rename(
+    rodzaj = gen, gatunek_naukowy = sp, gatunek = en, obserwator = rec,
+    kraj = cnt, miasto = loc, LAT = lat, LNG = lng,
+    wysokosc_m = alt,
+    typ_glosu_raw = type,
+    dlugosc_s_raw = length, 
+    czas_n_raw = time,
+    data_n_raw = date,
+    ptak_widziany = `bird-seen`
+  ) |>
+  mutate(
+    # 1. Konwersje numeryczne (Lokalizacja, Wysokość)
+    LAT = as.numeric(LAT),
+    LNG = as.numeric(LNG),
+    wysokosc_m = as.numeric(wysokosc_m),
+    
+    # 2. POPRAWIONA Konwersja DŁUGOŚCI NAGRAŃ (m:ss lub s.ss)
+    dlugosc_s = case_when(
+      # Przypadek 1: Format m:ss (zawiera dwukropek)
+      str_detect(dlugosc_s_raw, ":") ~ {
+        dlugosc_split = str_split(dlugosc_s_raw, ":", simplify = TRUE)
+        minuty = as.numeric(dlugosc_split[,1])
+        sekundy = as.numeric(dlugosc_split[,2])
+        (minuty * 60) + sekundy
+      },
+      # Przypadek 2: Format sekundy (nie zawiera dwukropka)
+      TRUE ~ as.numeric(dlugosc_s_raw)
+    ),
+    
+    # 3. Konwersje Czasu i Daty 
+    data_n = as_date(data_n_raw),
+    miesiac = factor(month(data_n, label = TRUE, abbr = FALSE), ordered = TRUE),
+    
+    czas_split = str_split(czas_n_raw, ":", simplify = TRUE),
+    godzina = as.numeric(czas_split[,1]),
+    minuta = as.numeric(czas_split[,2]),
+    godzina_dec = godzina + minuta / 60,
+    
+    # 4. Ujednolicenie Typu Głosu
+    typ_glosu_glowny = case_when(
+      str_detect(tolower(typ_glosu_raw), "song") ~ "song",
+      str_detect(tolower(typ_glosu_raw), "call") ~ "call",
+      TRUE ~ "other"
+    ),
+    typ_glosu_glowny = as.factor(typ_glosu_glowny),
+    
+    # 5. Normalizacja ptak_widziany
+    ptak_widziany = factor(tolower(ptak_widziany), levels = c("yes", "no"))
+  ) |>
+  # Filtracja do Francji Kontynentalnej
+  filter(
+    LAT > 41, LAT < 52, LNG > -5, LNG < 10
+  ) |>
+  # Usunięcie braków danych dla kluczowych analiz
+  drop_na(godzina_dec, typ_glosu_glowny, dlugosc_s, wysokosc_m, miesiac, ptak_widziany, LAT, LNG)
+
+ptaki_final_alt <- ptaki_final |>
+  mutate(
+    # Rozdzielenie stringu na godzinę i minutę
+    godzina = as.numeric(str_split(czas_n_raw, ":", simplify = TRUE)[,1]),
+    minuta = as.numeric(str_split(czas_n_raw, ":", simplify = TRUE)[,2]),
+    # Obliczenie godziny dziesiętnej
+    godzina_dec = godzina + minuta / 60
+  ) |>
+  drop_na(godzina_dec)
+
+
+# KONTROLA I OBSŁUGA BRAKÓW W CZASIE
+
+# Sprawdzenie, ile wartości czasu jest brakujących po konwersji
+liczba_brakow_czasu <- sum(is.na(ptaki_final$godzina_dec))
+liczba_total <- nrow(ptaki_final_alt)
+
+#cat("Brakujące wartości po konwersji czasu (godzina_dec):", liczba_brakow_czasu, "z", liczba_total, "\n")
+
+# Usuwamy wiersze z brakami, jeśli są
+ptaki_final_alt <- ptaki_final_alt |>
+  drop_na(godzina_dec)
+
+#cat("Liczba obserwacji po usunięciu braków czasu:", nrow(ptaki_final_alt), "\n")
+
+# Tworzenie histogramu 
+wykres_dobowy <- ptaki_final_alt |>
+  ggplot(aes(x = godzina_dec)) +
+  
+  geom_histogram(
+    binwidth = 1, # Szerokość każdego słupka = 1 godzina
+    fill = "#17a2b8",
+    color = "black"
+  ) +
+  
+  scale_x_continuous(
+    breaks = seq(0, 24, by = 4),
+    limits = c(0, 24)
+  ) +
+  
+  labs(
+    title = "Dobowy Cykl Nagrań Ptaków",
+    subtitle = "Częstotliwość nagrań w zależności od godziny dnia",
+    x = "Godzina (0-24)",
+    y = "Liczba Nagrań"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 0, hjust = 0.5))
+
+#print(wykres_dobowy)
+
+wykres_dobowy_proc <- ptaki_final_alt |>
+  ggplot(aes(x = godzina_dec)) +
+  
+  geom_histogram(
+    aes(y = after_stat(count / sum(count) * 100)),
+    binwidth = 1,
+    fill = "#17a2b8",
+    color = "black"
+  ) +
+  
+  geom_text(
+    stat = "bin",
+    binwidth = 1,
+    aes(
+      y = after_stat(count / sum(count) * 100),
+      label = paste0(round(after_stat(count / sum(count) * 100), 1))
+    ),
+    vjust = -0.3,
+    size = 2
+  ) +
+  
+  scale_x_continuous(
+    breaks = seq(0, 24, by = 2)
+  ) +
+  
+  coord_cartesian(xlim = c(0, 24)) +
+  
+  labs(
+    title = "Dobowy cykl nagrań ptaków",
+    subtitle = "Procentowy udział nagrań w poszczególnych godzinach",
+    x = "Godzina",
+    y = "Udział procentowy (%)"
+  ) +
+  
+  theme_minimal()
+
+print(wykres_dobowy_proc)
+```
+
+Wnioski: Analiza cyklu dobowego nagrań wskazuje na wyraźny szczyt aktywności w godzinach porannych, pomiędzy 6:00 a 9:00. Jest to zgodne z biologiczną aktywnością ptaków oraz z wzorcami obserwacji terenowych. Niska aktywność w godzinach popołudniowych i nocnych między 13:00 a 4:00 odzwierciedla zarówno brak aktywności głosowej ptaków, jak i ograniczenia w prowadzeniu obserwacji przez obserwatorów.
+
+```{r}
+#| message: false
+#| warning: false
+#| echo: false
+
+library(tidyverse)
+library(stringr)
+library(lubridate)
+library(maps)
+library(ggplot2)
+
+# Ustawienie katalogu roboczego
+#setwd("E:/uczelnia/semestr 5/pakiety/projekt")
+setwd("C:/Users/Stasiu/Desktop/Gabi/pakiety_stat/projekt")
+ptaki_raw <- read_csv("birds_france.csv")
+
+# KROK 1: CZYSZCZENIE, TRANSFORMACJA I FILTROWANIE DANYCH 
+
+ptaki_final <- ptaki_raw |>
+  rename(
+    rodzaj = gen,
+    gatunek_naukowy = sp,
+    gatunek = en,
+    obserwator = rec,
+    kraj = cnt,
+    miasto = loc,
+    LAT = lat,
+    LNG = lng,
+    wysokosc_m = alt,
+    typ_glosu_raw = type,
+    dlugosc_s = length,
+    czas_n_raw = time,
+    data_n_raw = date,
+    ptak_widziany = `bird-seen`
+  ) |>
+  mutate(
+    # 1. Konwersje numeryczne
+    LAT = as.numeric(LAT),
+    LNG = as.numeric(LNG),
+    wysokosc_m = as.numeric(wysokosc_m),
+    dlugosc_s = as.numeric(dlugosc_s),
+    
+    # 2. Konwersje czasu i daty
+    data_n = as_date(data_n_raw),
+    miesiac = factor(month(data_n, label = TRUE, abbr = FALSE), ordered = TRUE),
+    
+    # Ręczna konwersja czasu 
+    czas_split = str_split(czas_n_raw, ":", simplify = TRUE),
+    godzina = as.numeric(czas_split[,1]),
+    minuta = as.numeric(czas_split[,2]),
+    godzina_dec = godzina + minuta / 60,
+    
+    # 3. Ujednolicenie Typu Głosu
+    typ_glosu_glowny = case_when(
+      str_detect(tolower(typ_glosu_raw), "song") ~ "song",
+      str_detect(tolower(typ_glosu_raw), "call") ~ "call",
+      TRUE ~ "other"
+    ),
+    typ_glosu_glowny = as.factor(typ_glosu_glowny),
+    
+    # 4. Normalizacja ptak_widziany
+    ptak_widziany = factor(tolower(ptak_widziany), levels = c("yes", "no"))
+  ) |>
+  # Filtracja do Francji Kontynentalnej
+  filter(
+    LAT > 41,
+    LAT < 52,
+    LNG > -5,
+    LNG < 10
+  ) |>
+  # Usunięcie braków danych dla kluczowych analiz
+  drop_na(godzina_dec, typ_glosu_glowny, dlugosc_s, wysokosc_m, miesiac, ptak_widziany, LAT, LNG)
+
+#cat("Liczba obserwacji po kompletnym czyszczeniu:", nrow(ptaki_final), "\n")
+
+# 1. Agregacja i zaokrąglanie czasu
+analiza_dobowo_sezonowa <- ptaki_final |>
+  # Utworzenie zmiennej dla pełnej godziny nagrania
+  mutate(godzina_pelna = floor(godzina_dec)) |>
+  # Filtrujemy tylko 'song' i 'call' dla czytelności
+  filter(typ_glosu_glowny %in% c("song", "call")) |>
+  group_by(miesiac, godzina_pelna, typ_glosu_glowny) |>
+  summarise(
+    liczba_nagran = n(),
+    .groups = 'drop'
+  )
+
+# Konwersja godziny na faktor, by zapewnić poprawny porządek na osi Y
+analiza_dobowo_sezonowa$godzina_pelna <- factor(analiza_dobowo_sezonowa$godzina_pelna, levels = 0:23)
+
+# 2. Wizualizacja: Mapa Ciepła
+wykres_dobowo_sezonowy <- analiza_dobowo_sezonowa |>
+  ggplot(aes(x = miesiac, y = godzina_pelna, fill = liczba_nagran)) +
+  
+  #wyższe kratki
+  #coord_fixed(ratio = NULL) +
+  #guides(fill = guide_colorbar(title.position = "top", title.hjust = 0.5,
+                               #barwidth = unit(0.6, "cm"),
+                               #barheight = unit(6, "cm"))) +
+  theme(
+    theme(panel.spacing.x = unit(1.7, "cm")),
+    theme(panel.spacing.y = unit(4, "cm")),
+    legend.position = "right",
+    legend.key.height = unit(1.2, "cm"),
+    legend.title = element_text(size = 9),
+    legend.text = element_text(size = 8),
+    panel.spacing = unit(0.6, "lines")  # więcej miejsca między panelami jeśli masz facety
+  ) +
+  
+  # Geom_tile tworzy prostokąty z kolorem odpowiadającym wartości (liczba_nagran)
+  geom_tile(color = "white", linewidth = 0.1) +
+  
+  # Skala kolorów (viridis daje ładne przejścia)
+  scale_fill_viridis_c(name = "Liczba Nagrań", option = "D", direction = -1) +
+  
+  # Podział na typ głosu
+  facet_wrap(~ typ_glosu_glowny, ncol = 2) +
+  
+  labs(
+    title = "Aktywność Ptaków: Czas Dobowy vs. Sezonowość",
+    subtitle = "Intensywność nagrań (liczba) w zależności od miesiąca i godziny",
+    x = "Miesiąc Nagrania",
+    y = "Godzina (0-23)"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 8),
+    axis.text.y = element_text(size = 7),
+    plot.title = element_text(face = "bold")
+  )
+
+print(wykres_dobowo_sezonowy)
+```
+
+Wnioski:
+
+1.  Nawoływanie (call):
+
+-   Pora roku: Choć szczyt przypada na kwiecień, maj i czerwiec, rozkład jest bardziej zrównoważony. Aktywność call jest widoczna nawet w miesiącach jesiennych i zimowych, kiedy nagrania song praktycznie zanikają.
+
+<!-- -->
+
+-   Pora dnia: Nagrania call są bardziej rozłożone w ciągu dnia, bez tak gwałtownego, krótkiego szczytu, jak ma to miejsce w przypadku śpiewu. Nagrania te są bardziej stabilne i utrzymują się dłużej.
+
+2.  Śpiew (song):
+
+-   Pora roku: Kwiecień, maj i czerwiec są absolutnie dominujące.
+
+<!-- -->
+
+-   Pora dnia: Największa intensywność nagrań song przypada na godziny 6:00 do 9:00 rano. Okres ten jest znany jako "chór świtu". Po godzinie 13:00 nagrania są sporadyczne.
+
+```{r}
+#| message: false
+#| warning: false
+#| echo: false
+
+library(tidyverse)
+library(stringr)
+library(lubridate)
+library(maps)
+library(ggplot2)
+library(patchwork)
+library(png)
+library(jpeg)
+library(grid)
+
+#setwd("E:/uczelnia/semestr 5/pakiety/projekt")
+setwd("C:/Users/Stasiu/Desktop/Gabi/pakiety_stat/projekt")
+ptaki_raw <- read_csv("birds_france.csv")
+
+
+# CZYSZCZENIE I TRANSFORMACJA DANYCH
+ptaki_clean <- ptaki_raw |>
+  rename(
+    rodzaj = gen,
+    gatunek_naukowy= sp,
+    gatunek = en,
+    obserwator = rec,
+    kraj = cnt,
+    miasto = loc,
+    LAT = lat,
+    LNG = lng
+  ) |>
+  mutate(
+    LAT = as.numeric(LAT),
+    LNG = as.numeric(LNG)
+  ) |>
+  #  FILTROWANIE DANYCH PTASICH DO FRANCJI KONTYNENTALNEJ
+  filter(
+    LAT > 41,
+    LAT < 52,
+    LNG > -5,
+    LNG < 10
+  )
+
+
+# WIZUALIZACJA
+
+# 1. Przygotowanie danych mapy bazowej
+granice_francji <- map_data("france") |>
+  # FILTROWANIE DANYCH MAPY DO FRANCJI KONTYNENTALNEJ
+  filter(
+    lat > 41,
+    lat < 52,
+    long > -5,
+    long < 10
+  )
+
+
+# 2. Tworzenie mapy
+mapa_ptakow_kontynentalna <- ggplot() +
+  
+  # Warstwa 1: Granice Francji Kontynentalnej
+  geom_polygon(
+    data = granice_francji,
+    aes(x = long, y = lat, group = group),
+    fill = "lightgray",
+    color = "darkgray"
+  ) +
+  
+  # Warstwa 2: Punkty nagrań ptaków (tylko kontynentalne)
+  geom_point(
+    data = ptaki_clean, # Używamy przefiltrowanego zbioru
+    aes(x = LNG, y = LAT),
+    color = "darkred",
+    alpha = 0.3,
+    size = 0.2
+  ) +
+  
+  coord_fixed(1.3) +
+  
+  labs(
+    title = "Geograficzny Rozkład Nagrań Ptaków w Kontynentalnej Francji",
+    subtitle = paste("Liczba nagrań po filtracji:", nrow(ptaki_clean)),
+    x = "Długość geograficzna (LNG)",
+    y = "Szerokość geograficzna (LAT)"
+  ) +
+  theme_minimal() +
+  theme(
+    panel.grid = element_blank(),
+    axis.text = element_blank()
+  )
+
+# Wyświetlenie mapy
+#print(mapa_ptakow_kontynentalna)
+
+
+lewo <- mapa_ptakow_kontynentalna
+
+mapka <- png::readPNG("C:/Users/Stasiu/Desktop/Gabi/pakiety_stat/projekt/parki.png")
+grafika <- rasterGrob(mapka, interpolate = TRUE)
+
+srodek <- ggplot() + 
+  annotation_custom(grafika, xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf)
+
+mapka2 <- jpeg::readJPEG("C:/Users/Stasiu/Desktop/Gabi/pakiety_stat/projekt/parki2.jpg")
+grafika2 <- rasterGrob(mapka2, interpolate = TRUE)
+
+prawo <- ggplot() + 
+  annotation_custom(grafika2, xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf)
+
+wykres_polaczony <- lewo + srodek + plot_layout(ncol = 2)
+print(wykres_polaczony)
+```
+
+*#czy dałoby się zmienić w tej mapce żeby były obrysy województw zamiast regionów? łatwiej będzie porównywać mapkę*
+
+*#dodać podpis pod mapką i źródło*
+
+[*https://francja.studentnews.pl/*](https://francja.studentnews.pl/)
+
+Wnioski: Analiza rozkładu geograficznego nagrań ptaków ujawnia wyraźną koncentrację w rezerwatach przyrody położonych w szczególności w pobliżu dużych skupisk miejskich (np Paryż, Genewa, Tuluza) oraz lazurowego wybrzeża. Taka dystrybucja może wskazywać nie tylko na obszary o wysokiej bioróżnorodności, ale także na nierównomierne rozmieszczenie badaczy-rejestratorów. Zauważalnie mniej nagrań pochodzi z mniej zaludnionych rejonów Francji oraz obszarów górskich.
+
+### Ptasie głosy
+
+```{r}
+#| message: false
+#| warning: false
+#| echo: false
+
+library(tidyverse)
+library(stringr)
+library(lubridate)
+library(maps)
+library(ggplot2)
+
+# Ustawienie katalogu roboczego
+#setwd("E:/uczelnia/semestr 5/pakiety/projekt")
+setwd("C:/Users/Stasiu/Desktop/Gabi/pakiety_stat/projekt")
+ptaki_raw <- read_csv("birds_france.csv")
+
+# KROK 1: CZYSZCZENIE, TRANSFORMACJA I FILTROWANIE DANYCH 
+
+ptaki_final <- ptaki_raw |>
+  rename(
+    rodzaj = gen,
+    gatunek_naukowy = sp,
+    gatunek = en,
+    obserwator = rec,
+    kraj = cnt,
+    miasto = loc,
+    LAT = lat,
+    LNG = lng,
+    wysokosc_m = alt,
+    typ_glosu_raw = type,
+    dlugosc_s = length,
+    czas_n_raw = time,
+    data_n_raw = date,
+    ptak_widziany = `bird-seen`
+  ) |>
+  mutate(
+    # 1. Konwersje numeryczne
+    LAT = as.numeric(LAT),
+    LNG = as.numeric(LNG),
+    wysokosc_m = as.numeric(wysokosc_m),
+    dlugosc_s = as.numeric(dlugosc_s),
+    
+    # 2. Konwersje czasu i daty
+    data_n = as_date(data_n_raw),
+    miesiac = factor(month(data_n, label = TRUE, abbr = FALSE), ordered = TRUE),
+    
+    # Ręczna konwersja czasu 
+    czas_split = str_split(czas_n_raw, ":", simplify = TRUE),
+    godzina = as.numeric(czas_split[,1]),
+    minuta = as.numeric(czas_split[,2]),
+    godzina_dec = godzina + minuta / 60,
+    
+    # 3. Ujednolicenie Typu Głosu
+    typ_glosu_glowny = case_when(
+      str_detect(tolower(typ_glosu_raw), "song") ~ "song",
+      str_detect(tolower(typ_glosu_raw), "call") ~ "call",
+      TRUE ~ "other"
+    ),
+    typ_glosu_glowny = as.factor(typ_glosu_glowny),
+    
+    # 4. Normalizacja ptak_widziany
+    ptak_widziany = factor(tolower(ptak_widziany), levels = c("yes", "no"))
+  ) |>
+  # Filtracja do Francji Kontynentalnej
+  filter(
+    LAT > 41,
+    LAT < 52,
+    LNG > -5,
+    LNG < 10
+  ) |>
+  # Usunięcie braków danych dla kluczowych analiz
+  drop_na(godzina_dec, typ_glosu_glowny, dlugosc_s, wysokosc_m, miesiac, ptak_widziany, LAT, LNG)
+
+#cat("Liczba obserwacji po kompletnym czyszczeniu:", nrow(ptaki_final), "\n")
+
+# 1. Agregacja danych: Liczba nagrań każdego typu na miesiąc
+analiza_sezonowosci_typu <- ptaki_final |>
+  group_by(miesiac, typ_glosu_glowny) |>
+  summarise(
+    liczba_nagran = n(),
+    .groups = 'drop'
+  ) |>
+  # Analizujemy tylko główne kategorie
+  filter(typ_glosu_glowny %in% c("song", "call"))
+
+# 2. Wizualizacja: Wykres słupkowy skumulowany (proporcje i całkowita liczba)
+wykres_sezonowosci_typu <- analiza_sezonowosci_typu |>
+  ggplot(aes(x = miesiac, y = liczba_nagran, fill = typ_glosu_glowny)) +
+  geom_col() + # Skumulowane słupki pokazują całkowitą liczbę nagrań w miesiącu oraz udział każdego typu
+  labs(
+    title = "Sezonowość Typów Nagrań Ptaków (Song vs. Call)",
+    subtitle = "Liczba nagrań 'song' i 'call' w podziale na miesiące",
+    x = "Miesiąc Nagrania",
+    y = "Liczba Nagrań",
+    fill = "Typ Głosu"
+  ) +
+  theme_minimal() +
+  # Niebieski dla Song, Zielony dla Call
+  scale_fill_manual(values = c("song" = "#007bff", "call" = "#28a745")) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+print(wykres_sezonowosci_typu)
+
+```
+
+Wnioski:
+
+1.  Dominacja śpiewu (song) wiosną:
+
+-   W miesiącach kwiecień, maj i czerwiec następuje gwałtowny wzrost ogólnej liczby nagrań, a typ song (śpiew godowy i terytorialny) stanowi zdecydowaną większość rejestracji (najwyższe niebieskie słupki). Jest to szczyt sezonu lęgowego.
+
+2.  Wzrost nawoływania (call)
+
+-   W miesiącach letnich, jesiennych i zimowych całkowita liczba nagrań gwałtownie spada, ale nagrania typu call (nawoływanie) stanowią wyższy udział w ogólnej liczbie miesięcznej. Dzieje się tak, ponieważ po zakończeniu lęgów ptaki rzadziej śpiewają, a częściej używają nawoływań kontaktowych lub alarmowych.
+
+3.  W rezultacie, typ nagrania ma wyraźny charakter sezonowy: nagrywanie w okresie wiosennym ma na celu głównie rejestrację śpiewu, podczas gdy nagrania poza tym okresem są bardziej zdominowane (proporcjonalnie) przez nawoływania.
+
+```{r}
+#| message: false
+#| warning: false
+#| echo: false
+
+library(tidyverse)
+library(stringr)
+library(lubridate)
+library(maps)
+library(ggplot2)
+
+#setwd("E:/uczelnia/semestr 5/pakiety/projekt")
+setwd("C:/Users/Stasiu/Desktop/Gabi/pakiety_stat/projekt")
+ptaki_raw <- read_csv("birds_france.csv")
+
+# CZYSZCZENIE, TRANSFORMACJA I FILTRACJA (CAŁOŚĆ Z POPRAWKĄ CZASU)
+ptaki_final <- ptaki_raw |>
+  rename(
+    rodzaj = gen,
+    gatunek_naukowy= sp,
+    gatunek = en,
+    obserwator = rec,
+    kraj = cnt,
+    miasto = loc,
+    LAT = lat,
+    LNG = lng,
+    
+    # Konwersja nazw dla zmiennych czasowych i typów
+    czas_n_raw = time,
+    typ_glosu_raw = type
+    # Zakładamy, że TIME i TYPE są nazwami kolumn w CSV
+  ) |>
+  mutate(
+    LAT = as.numeric(LAT),
+    LNG = as.numeric(LNG),
+    
+    # POPRAWKA KONWERSJI CZASU:
+    # Używamy str_split do ręcznego wyciągnięcia godziny i minuty.
+    czas_split = str_split(czas_n_raw, ":", simplify = TRUE),
+    
+    godzina = as.numeric(czas_split[,1]),
+    minuta = as.numeric(czas_split[,2]),
+    
+    # Tworzymy godzinę dziesiętną
+    godzina_dec = godzina + minuta / 60,
+    
+    # UJEDNOLICENIE TYPU GŁOSU:
+    typ_glosu_glowny = case_when(
+      str_detect(tolower(typ_glosu_raw), "song") ~ "song",
+      str_detect(tolower(typ_glosu_raw), "call") ~ "call",
+      TRUE ~ "other"
+    ),
+    typ_glosu_glowny = as.factor(typ_glosu_glowny)
+  ) |>
+  # Filtracja do Francji Kontynentalnej
+  filter(
+    LAT > 41,
+    LAT < 52,
+    LNG > -5,
+    LNG < 10
+  ) |>
+  # Usunięcie braków dla kluczowych analiz (w tym czasu po ręcznej konwersji)
+  drop_na(godzina_dec, typ_glosu_glowny)
+
+# Sprawdź, czy teraz masz wartości:
+#cat("Liczba obserwacji z poprawnym czasem:", nrow(ptaki_final), "\n")
+
+# Zobacz, jakie wartości są w kolumnie godzina_dec (powinny być liczby 0-24)
+#summary(ptaki_final$godzina_dec)
+
+# Wykres Gęstości Typu Głosu vs. Pora Dnia
+wykres_typ_glosu_vs_czas <- ptaki_final |>
+  # Filtrujemy tylko 'song' i 'call' dla czytelności wykresu
+  filter(typ_glosu_glowny %in% c("song", "call")) |>
+  
+  ggplot(aes(x = godzina_dec, fill = typ_glosu_glowny)) +
+  
+  geom_density(
+    alpha = 0.5,
+    adjust = 1.5
+  ) +
+  
+  scale_x_continuous(
+    breaks = seq(0, 24, by = 4),
+    limits = c(0, 24)
+  ) +
+  
+  labs(
+    title = "Typ Głosu a Pora Dnia",
+    subtitle = "Porównanie rozkładu czasowego nagrań 'song' i 'call'",
+    x = "Godzina (0-24)",
+    y = "Gęstość (Prawdopodobieństwo Nagrania)",
+    fill = "Typ Głosu"
+  ) +
+  theme_minimal()
+
+print(wykres_typ_glosu_vs_czas)
+```
+
+Wnioski: Rozkład czasowy nagrań różni się istotnie w zależności od typu głosu. Nagrania typu śpiew (song) wykazują silniejszą koncentrację w bardzo wczesnych godzinach porannych (między 6:00 a 9:00). Nagrania typu nawoływanie (call) mają szerszy i bardziej rozproszony rozkład w ciągu dnia, z mniejszym, ale bardziej stabilnym natężeniem aktywności, co sugeruje, że wołania są rejestrowane w sytuacjach mniej związanych z typowym cyklem lęgowym, a bardziej z codzienną komunikacją i żerowaniem.
+
+### Obserwacje wizualne
+
+```{r}
+#| message: false
+#| warning: false
+#| echo: false
+
+library(tidyverse)
+library(stringr)
+library(lubridate)
+library(maps)
+library(ggplot2)
+
+#setwd("E:/uczelnia/semestr 5/pakiety/projekt")
+setwd("C:/Users/Stasiu/Desktop/Gabi/pakiety_stat/projekt")
+ptaki_raw <- read_csv("birds_france.csv")
+
+# CZYSZCZENIE, TRANSFORMACJA I FILTROWANIE DANYCH 
+ptaki_final <- ptaki_raw |>
+  rename(
+    rodzaj = gen, gatunek_naukowy = sp, gatunek = en, obserwator = rec,
+    kraj = cnt, miasto = loc, LAT = lat, LNG = lng,
+    wysokosc_m = alt,
+    typ_glosu_raw = type,
+    dlugosc_s_raw = length, 
+    czas_n_raw = time,
+    data_n_raw = date,
+    ptak_widziany = `bird-seen`
+  ) |>
+  mutate(
+    # 1. Konwersje numeryczne (Lokalizacja, Wysokość)
+    LAT = as.numeric(LAT),
+    LNG = as.numeric(LNG),
+    wysokosc_m = as.numeric(wysokosc_m),
+    
+    # 2. POPRAWIONA Konwersja DŁUGOŚCI NAGRAŃ (m:ss lub s.ss)
+    dlugosc_s = case_when(
+      # Przypadek 1: Format m:ss (zawiera dwukropek)
+      str_detect(dlugosc_s_raw, ":") ~ {
+        dlugosc_split = str_split(dlugosc_s_raw, ":", simplify = TRUE)
+        minuty = as.numeric(dlugosc_split[,1])
+        sekundy = as.numeric(dlugosc_split[,2])
+        (minuty * 60) + sekundy
+      },
+      # Przypadek 2: Format sekundy (nie zawiera dwukropka)
+      TRUE ~ as.numeric(dlugosc_s_raw)
+    ),
+    
+    # 3. Konwersje Czasu i Daty 
+    data_n = as_date(data_n_raw),
+    miesiac = factor(month(data_n, label = TRUE, abbr = FALSE), ordered = TRUE),
+    
+    czas_split = str_split(czas_n_raw, ":", simplify = TRUE),
+    godzina = as.numeric(czas_split[,1]),
+    minuta = as.numeric(czas_split[,2]),
+    godzina_dec = godzina + minuta / 60,
+    
+    # 4. Ujednolicenie Typu Głosu
+    typ_glosu_glowny = case_when(
+      str_detect(tolower(typ_glosu_raw), "song") ~ "song",
+      str_detect(tolower(typ_glosu_raw), "call") ~ "call",
+      TRUE ~ "other"
+    ),
+    typ_glosu_glowny = as.factor(typ_glosu_glowny),
+    
+    # 5. Normalizacja ptak_widziany
+    ptak_widziany = factor(tolower(ptak_widziany), levels = c("yes", "no"))
+  ) |>
+  # Filtracja do Francji Kontynentalnej
+  filter(
+    LAT > 41, LAT < 52, LNG > -5, LNG < 10
+  ) |>
+  # Usunięcie braków danych dla kluczowych analiz
+  drop_na(godzina_dec, typ_glosu_glowny, dlugosc_s, wysokosc_m, miesiac, ptak_widziany, LAT, LNG)
+
+# 1. Statystyki podsumowujące (dla weryfikacji)
+analiza_dlugosci_vs_widziany <- ptaki_final |>
+  group_by(ptak_widziany) |>
+  summarise(
+    mediana_dlugosc = median(dlugosc_s, na.rm = TRUE),
+    sr_dlugosc = mean(dlugosc_s, na.rm = TRUE),
+    min_dlugosc = min(dlugosc_s, na.rm = TRUE), # Sprawdź, czy min jest > 0
+    liczba_nagran = n()
+  )
+
+#print(" Statystyki Długości Nagrań ")
+#print(analiza_dlugosci_vs_widziany)
+
+# 2. Wykres Boxplot
+wykres_dlugosc_vs_ptak_widziany <- ptaki_final |>
+  ggplot(aes(x = ptak_widziany, y = dlugosc_s, fill = ptak_widziany)) +
+  geom_boxplot(alpha = 0.7, outlier.alpha = 0.2) +
+  # Ograniczenie osi Y do 70 sekund 
+  coord_cartesian(ylim = c(0, 70)) +
+  labs(
+    title = "Długość Nagrania a Fakt Obserwacji Ptaka (Bird-Seen)",
+    x = "Czy Ptak Był Widziany?",
+    y = "Długość Nagrania (sekundy)"
+  ) +
+  scale_fill_manual(values = c("yes" = "#28a745", "no" = "#dc3545")) +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+print(wykres_dlugosc_vs_ptak_widziany)
+
+```
+
+Korelacja Pearsona:
+
+```{r}
+#| message: false
+#| warning: false
+#| echo: false
+
+library(dplyr)
+
+#setwd("E:/uczelnia/semestr 5/pakiety/projekt")
+setwd("C:/Users/Stasiu/Desktop/Gabi/pakiety_stat/projekt")
+ptaki <- read_csv("birds_france.csv")
+
+#filtrowanie tylko yes/no i brak NA w czasie
+ptaki_raw <- ptaki %>%
+  filter(`bird-seen` %in% c("yes","no"), !is.na(length))
+
+#zamiana yes/no na 0/1
+ptaki_raw <- ptaki_raw %>%
+  mutate(
+    seen_binarnie = ifelse(tolower(trimws(`bird-seen`)) == "yes", 1, 0)
+  )
+
+#czas MM:SS na sekundy
+parse_time_to_seconds <- function(x) {
+  sapply(strsplit(as.character(x), ":"), function(z) {
+    mins <- as.numeric(z[1])
+    secs <- as.numeric(z[2])
+    return(mins*60 + secs)
+  })
+}
+ptaki_raw <- ptaki_raw %>%
+  mutate(czas = parse_time_to_seconds(length))
+
+#korelacja punktowo-biserialna
+korelacja_test <- cor.test(ptaki_raw$seen_binarnie, ptaki_raw$czas)
+print(korelacja_test)
+```
+
+Wnioski: Mediana długości nagrań dla obserwacji z wizualnym potwierdzeniem ("yes") jest wyższa niż dla nagrań bez takiego potwierdzenia ("no"). Boxplot pokazuje, że rozkład czasu nagrań jest lekko przesunięty w stronę wyższych wartości dla grupy "yes". W grupie "no" jest więcej krótkich nagrań.
+
+Patrząc na wyniki korelacji Pearsona można zauważyć, że korelacja (cor = 0.01572757) pomiędzy długością nagrania a faktem czy ptak był widziany jest bardzo słaba. Za to p-value wynosi 0.02978 - zatem mniej niż standardowe 0.05 - co daje podstawę do odrzucenia hipotezy zerowej, która wskazywałaby na brak korelacji w danych. Zatem istnieje mała zależność, ale jest ona bardzo słaba i nieistotna w praktyce.
+
+Mechanizm tego zjawiska wynika prawdopodobnie z faktu, że obserwator widzący ptaka jest w stanie precyzyjniej śledzić źródło dźwięku, co umożliwia uzyskanie dłuższych nagrań. Z kolei brak wizualnego kontaktu z ptakiem często skutkuje przerywaniem nagrania w wyniku poszukiwań obiektu lub utraty źródła dźwięku, co skraca efektywny czas rejestracji.
+
+```{r}
+#| message: false
+#| warning: false
+#| echo: false
+
+library(tidyverse)
+library(stringr)
+library(lubridate)
+library(maps)
+library(ggplot2)
+
+# Ustawienie katalogu roboczego
+#setwd("E:/uczelnia/semestr 5/pakiety/projekt")
+setwd("C:/Users/Stasiu/Desktop/Gabi/pakiety_stat/projekt")
+ptaki_raw <- read_csv("birds_france.csv")
+
+# KROK 1: CZYSZCZENIE, TRANSFORMACJA I FILTROWANIE DANYCH 
+
+ptaki_final <- ptaki_raw |>
+  rename(
+    rodzaj = gen,
+    gatunek_naukowy = sp,
+    gatunek = en,
+    obserwator = rec,
+    kraj = cnt,
+    miasto = loc,
+    LAT = lat,
+    LNG = lng,
+    wysokosc_m = alt,
+    typ_glosu_raw = type,
+    dlugosc_s = length,
+    czas_n_raw = time,
+    data_n_raw = date,
+    ptak_widziany = `bird-seen`
+  ) |>
+  mutate(
+    # 1. Konwersje numeryczne
+    LAT = as.numeric(LAT),
+    LNG = as.numeric(LNG),
+    wysokosc_m = as.numeric(wysokosc_m),
+    dlugosc_s = as.numeric(dlugosc_s),
+    
+    # 2. Konwersje czasu i daty
+    data_n = as_date(data_n_raw),
+    miesiac = factor(month(data_n, label = TRUE, abbr = FALSE), ordered = TRUE),
+    
+    # Ręczna konwersja czasu 
+    czas_split = str_split(czas_n_raw, ":", simplify = TRUE),
+    godzina = as.numeric(czas_split[,1]),
+    minuta = as.numeric(czas_split[,2]),
+    godzina_dec = godzina + minuta / 60,
+    
+    # 3. Ujednolicenie Typu Głosu
+    typ_glosu_glowny = case_when(
+      str_detect(tolower(typ_glosu_raw), "song") ~ "song",
+      str_detect(tolower(typ_glosu_raw), "call") ~ "call",
+      TRUE ~ "other"
+    ),
+    typ_glosu_glowny = as.factor(typ_glosu_glowny),
+    
+    # 4. Normalizacja ptak_widziany
+    ptak_widziany = factor(tolower(ptak_widziany), levels = c("yes", "no"))
+  ) |>
+  # Filtracja do Francji Kontynentalnej
+  filter(
+    LAT > 41,
+    LAT < 52,
+    LNG > -5,
+    LNG < 10
+  ) |>
+  # Usunięcie braków danych dla kluczowych analiz
+  drop_na(godzina_dec, typ_glosu_glowny, dlugosc_s, wysokosc_m, miesiac, ptak_widziany, LAT, LNG)
+
+#cat("Liczba obserwacji po kompletnym czyszczeniu:", nrow(ptaki_final), "\n")
+
+# 1. Agregacja danych: Obliczenie odsetka nagrań "ptak widziany"
+analiza_sezonowosci_widziany <- ptaki_final |>
+  group_by(miesiac) |>
+  summarise(
+    calkowita_liczba_nagran = n(),
+    liczba_widzianych = sum(ptak_widziany == "yes"),
+    # Obliczenie odsetka nagrań z udaną obserwacją wizualną
+    odsetek_widziany = (liczba_widzianych / calkowita_liczba_nagran) * 100
+  ) |>
+  ungroup()
+
+#print("--- Odsetek Nagrań 'Ptak Widziany' w Skali Miesięcznej ---")
+#print(analiza_sezonowosci_widziany)
+
+# 2. Wizualizacja: Wykres liniowy odsetka
+wykres_sezonowosci_widziany <- analiza_sezonowosci_widziany |>
+  ggplot(aes(x = miesiac, y = odsetek_widziany, group = 1)) +
+  geom_line(color = "#e67e22", size = 1.2) + # Pomarańczowa linia
+  geom_point(color = "#e67e22", size = 3) +
+  labs(
+    title = "Sezonowość Obserwacji 'Ptak Widziany'",
+    subtitle = "Odsetek nagrań, którym towarzyszyła obserwacja wizualna ptaka",
+    x = "Miesiąc Nagrania",
+    y = "Odsetek Nagrań z Obserwacją Wizualną (%)"
+  ) +
+  theme_minimal() +
+  scale_y_continuous(limits = c(0, 100)) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+print(wykres_sezonowosci_widziany)
+```
+
+Wnioski: Paradoksalnie, mimo że jesienią i zimą obserwacje akustyczne występują rzadziej niż w sezonie (pomiędzy kwietniem a czerwcem), możemy zauważyć że poza sezonem częściej obserwacja akustyczna idzie w parze z obserwacją wizualną. Najwięcej obserwacji wizualnych zanotowano w styczniu oraz grudniu.
+
+Wyniki sugerują, że obserwacje akustyczne i wizualne uzupełniają się - w sezonie następuje lekki spadek rejestracji wizualnej, za to wzrost nagrań, a poza sezonem trend się odwraca.
+
+### Najczęstsze gatunki ptaków
+
+```{r}
+#| message: false
+#| warning: false
+#| echo: false
+
+#setwd("E:/uczelnia/semestr 5/pakiety/projekt")
+#setwd("C:/Users/Stasiu/Desktop/Gabi/pakiety_stat/projekt")
+#ptaki_raw <- read_csv("birds_france.csv")
+
+#ptaki_raw |> 
+#  filter(!is.na(sp), sp != "mystery") |>
+#  count(sp, sort = TRUE) |>
+#  slice_max(n, n = 10) |>
+#  rename('gatunek ptaka' = sp, 
+#         'liczba obserwacji akustycznych' = n)
+```
+
+```{r}
+#| message: false
+#| warning: false
+#| echo: false
+
+library(gt)
+
+#setwd("E:/uczelnia/semestr 5/pakiety/projekt")
+setwd("C:/Users/Stasiu/Desktop/Gabi/pakiety_stat/projekt")
+ptaki_raw <- read_csv("birds_france.csv")
+
+ptaki_raw |> 
+  filter(!is.na(sp), sp != "mystery") |>
+  count(sp, sort = TRUE) |>
+  slice_max(n, n = 10) |>
+  rename(gatunek = sp, liczba = n) |>
+  gt() |>
+  tab_header(
+    title = "Najczęściej nagrywane gatunki ptaków"
+  ) |>
+  cols_label(
+    gatunek = "Gatunek ptaka",
+    liczba = "Liczba obserwacji"
+  ) |>
+  tab_options(
+    table.width = pct(80),
+    heading.title.font.size = px(18)
+  ) |>
+  opt_stylize(color = "blue", style = 1) 
+```
+
+W tabeli mamy przedstawione 10 najczęściej słyszanych gatunków ptaków - 2 gatunki ex aeqou na dziesiątym miejscu.
+
+```{r}
+#| message: false
+#| warning: false
+#| echo: false
+
+library(tidyverse)
+library(stringr)
+library(lubridate)
+library(maps)
+library(ggplot2)
+
+# Ustawienie katalogu roboczego
+#setwd("E:/uczelnia/semestr 5/pakiety/projekt")
+setwd("C:/Users/Stasiu/Desktop/Gabi/pakiety_stat/projekt")
+ptaki_raw <- read_csv("birds_france.csv")
+
+# KROK 1: CZYSZCZENIE, TRANSFORMACJA I FILTROWANIE DANYCH 
+
+ptaki_final <- ptaki_raw |>
+  rename(
+    rodzaj = gen,
+    gatunek_naukowy = sp,
+    gatunek = en,
+    obserwator = rec,
+    kraj = cnt,
+    miasto = loc,
+    LAT = lat,
+    LNG = lng,
+    wysokosc_m = alt,
+    typ_glosu_raw = type,
+    dlugosc_s = length,
+    czas_n_raw = time,
+    data_n_raw = date,
+    ptak_widziany = `bird-seen`
+  ) |>
+  mutate(
+    # 1. Konwersje numeryczne
+    LAT = as.numeric(LAT),
+    LNG = as.numeric(LNG),
+    wysokosc_m = as.numeric(wysokosc_m),
+    dlugosc_s = as.numeric(dlugosc_s),
+    
+    # 2. Konwersje czasu i daty
+    data_n = as_date(data_n_raw),
+    miesiac = factor(month(data_n, label = TRUE, abbr = FALSE), ordered = TRUE),
+    
+    # Ręczna konwersja czasu 
+    czas_split = str_split(czas_n_raw, ":", simplify = TRUE),
+    godzina = as.numeric(czas_split[,1]),
+    minuta = as.numeric(czas_split[,2]),
+    godzina_dec = godzina + minuta / 60,
+    
+    # 3. Ujednolicenie Typu Głosu
+    typ_glosu_glowny = case_when(
+      str_detect(tolower(typ_glosu_raw), "song") ~ "song",
+      str_detect(tolower(typ_glosu_raw), "call") ~ "call",
+      TRUE ~ "other"
+    ),
+    typ_glosu_glowny = as.factor(typ_glosu_glowny),
+    
+    # 4. Normalizacja ptak_widziany
+    ptak_widziany = factor(tolower(ptak_widziany), levels = c("yes", "no"))
+  ) |>
+  # Filtracja do Francji Kontynentalnej
+  filter(
+    LAT > 41,
+    LAT < 52,
+    LNG > -5,
+    LNG < 10,
+    !is.na(gatunek_naukowy),
+    gatunek_naukowy != "mystery"
+  ) |>
+  # Usunięcie braków danych dla kluczowych analiz
+  drop_na(godzina_dec, typ_glosu_glowny, dlugosc_s, wysokosc_m, miesiac, ptak_widziany, LAT, LNG)
+
+#cat("Liczba obserwacji po kompletnym czyszczeniu:", nrow(ptaki_final), "\n")
+
+# 1. Identyfikacja 10 najczęściej nagrywanych gatunków
+top_10_gatunkow <- ptaki_final |>
+  count(gatunek_naukowy, sort = TRUE) |>
+  slice_head(n = 10) |>
+  pull(gatunek_naukowy)
+
+# 2. Filtracja danych do Top 10
+ptaki_top10_gatunki <- ptaki_final |>
+  filter(gatunek_naukowy %in% top_10_gatunkow) |>
+  mutate(gatunek_naukowy = fct_reorder(gatunek_naukowy, dlugosc_s, .fun = median)) # Sortowanie dla wykresu
+
+# 3. Agregacja danych dla obserwacji wizualnej
+analiza_widziany_vs_gatunek <- ptaki_top10_gatunki |>
+  group_by(gatunek_naukowy) |>
+  summarise(
+    odsetek_widziany = sum(ptak_widziany == "yes", na.rm = TRUE) / n() * 100
+  ) |>
+  # Sortowanie gatunków na wykresie wg odsetka 'ptak widziany'
+  mutate(gatunek_naukowy = fct_reorder(gatunek_naukowy, odsetek_widziany))
+
+# Wyświetlenie tabeli z danymi
+#print("Tabela: Odsetek 'Ptak Widziany' dla Top 10 Gatunków")
+#print(analiza_widziany_vs_gatunek)
+
+
+# Bar chart odsetka 'ptak widziany'
+wykres_widziany_vs_gatunek <- analiza_widziany_vs_gatunek |>
+  ggplot(aes(x = gatunek_naukowy, y = odsetek_widziany, fill = odsetek_widziany)) +
+  geom_col(show.legend = FALSE) +
+  scale_fill_gradient(low = "#f1c40f", high = "#2ecc71") +
+  
+  labs(
+    title = "Odsetek Nagrań z Obserwacją 'Ptak Widziany' dla Top 10 Gatunków",
+    subtitle = "Częstotliwość udanej obserwacji wizualnej różni się między gatunkami",
+    x = "Gatunek Naukowy",
+    y = "Odsetek Nagrań z Udziałem Obserwacji Wizualnej (%)"
+  ) +
+  coord_flip() +
+  theme_minimal()
+
+print(wykres_widziany_vs_gatunek)
+
+```
+
+Wnioski: Patrząc na wyniki można wyciągnąć wniosek, że gatunki w tabeli (ptaki słyszane) oraz gatunki na wykresie (ptaki na raz słyszane oraz widziane) nie pokrywają się w stu procentach. Pomimo, że niektóre gatunki są często identyfikowane akustycznie, to ich obserwacja wzrokowa w terenie bywa utrudniona.
+
+Można zauważyć aż 6 gatunków wysoce obserwowalnych - obserwacja wizualna towarzyszy obserwacji akustycznej w ponad 70% przypadków.
+
+# Podsumowanie
+
+### Miejsca i pory obserwacji
+
+-   Najwięcej obserwacji następuje pomiędzy kwietniem a czerwcem.
+
+-   Potem kończy się sezon lęgowy oraz następują migracje, przez co liczba obserwacji zauważalnie spada.
+
+-   Najwyższa aktywność godzinowa przypada pomiędzy 6:00 a 9:00 rano, a pomiędzy 6:00 i 12:00 rejestrowane jest średnio 56% wszystkich dobowych obserwacji.
+
+-   Patrząc na mapę obserwacji, widać ich skupienie wokół rezerwatów dzikiej przyrody.
+
+### Ptasie głosy
+
+-   Ptasi śpiew jest zjawiskiem sezonowym - gwałtowny wzrost jego nagrań przypada od kwietnia do czerwca, głównie od 6:00 do 9:00 rano.
+
+-   Od lata ogólna liczba nagrań spada, za to nawoływanie stanowi wyższy udział w liczbie miesięcznej.
+
+-   Nawoływania można usłyszeć przez cały rok oraz na przestrzeni całego dnia, nawet w godzinach bardzo późnych i bardzo wczesnych.
+
+### Obserwacje wizualne
+
+-   Obserwacja wizualna ptaka może sprzyjać dłuższej obserwacji akustycznej.
+
+-   Zimą obserwacje wizualne są łatwiejsze, mimo mniejszej aktywności ptaków.
+
+### Gatunki jakie można najczęściej zobaczyć
+
+-   6 najczęściej słyszanych i obserwowanych ptaki - modraszka, sikora uboga, bogatka, rudzik, pierwiosnek oraz zięba.
+
+-   Podium należy do przedstawicieli rodziny sikor.
+
+-   5 najczęściej słyszanych - niekoniecznie widzianych - ptaków to bogatka, zięba, rudzik, kapturka oraz pierwiosnek.
